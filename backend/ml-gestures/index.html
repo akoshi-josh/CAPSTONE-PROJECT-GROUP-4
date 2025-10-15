@@ -9,61 +9,224 @@
   <script src="https://cdn.jsdelivr.net/npm/@mediapipe/drawing_utils/drawing_utils.js" crossorigin="anonymous"></script>
   <script src="https://cdn.jsdelivr.net/npm/@mediapipe/hands/hands.js" crossorigin="anonymous"></script>
   <script src="https://cdn.jsdelivr.net/npm/@tensorflow/tfjs@latest"></script>
-  <script src="./mediapipe-hands.js"></script>
   <script src="./gesture-model.js"></script>
   <style>
     body { margin: 0; padding: 0; overflow: hidden; }
-    #video { width: 100vw; height: 100vh; }
-    canvas { position: absolute; top: 0; left: 0; }
-    #output { position: absolute; bottom: 20px; left: 20px; color: white; font-size: 24px; background: rgba(0,0,0,0.5); padding: 10px; }
+    #video { 
+      width: 100vw; 
+      height: 100vh; 
+      transform: scaleX(-1); /* Mirror the video feed horizontally */
+    }
+    canvas { 
+      position: absolute; 
+      top: 0; 
+      left: 0; 
+      transform: scaleX(-1); /* Mirror the canvas to match video */
+    }
+    #output { 
+      position: absolute; 
+      bottom: 20px; 
+      left: 20px; /* Position at bottom-left (normal reading side) */
+      color: white; 
+      font-size: 24px; 
+      background: rgba(0,0,0,0.5); 
+      padding: 10px; 
+      z-index: 10; /* Ensure text is on top */
+    }
   </style>
 </head>
 <body>
   <video id="video" autoplay playsinline></video>
   <canvas id="canvas"></canvas>
-  <div id="output">Hold up an ASL sign...</div>
+  <div id="output">Hold up a hand...</div>
   <script>
+    // Define HAND_CONNECTIONS (MediaPipe constant for drawing)
+    const HAND_CONNECTIONS = [
+      [0, 1], [1, 2], [2, 3], [3, 4],  // Thumb
+      [0, 5], [5, 6], [6, 7], [7, 8],  // Index
+      [0, 9], [9, 10], [10, 11], [11, 12], // Middle
+      [0, 13], [13, 14], [14, 15], [15, 16], // Ring
+      [0, 17], [17, 18], [18, 19], [19, 20], // Pinky
+      [5, 9], [9, 13], [13, 17], [0, 17] // Palm
+    ];
+
     const hands = new Hands({locateFile: (file) => `https://cdn.jsdelivr.net/npm/@mediapipe/hands/${file}`});
-    hands.setOptions({ maxNumHands: 2, modelComplexity: 1 });
+    // Low thresholds for easier detection
+    hands.setOptions({ 
+      maxNumHands: 1,  // Start with 1 for simplicity
+      modelComplexity: 0,  // Faster, lighter model
+      minDetectionConfidence: 0.3,  // Very low to catch hands
+      minTrackingConfidence: 0.3    // Low for tracking
+    });
     hands.onResults(onResults);
 
-    async function init() {
-      await loadModel(); // From gesture-model.js
-      const video = document.getElementById('video');
-      await startCamera(video);
-      const camera = new Camera(video, {
-        onFrame: async () => { await hands.send({ image: video }); },
-        width: 640, height: 480
-      });
-      camera.start();
-    }
-
-    async function startCamera(video) {
-      const stream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: 'user' } });
-      video.srcObject = stream;
-    }
-
-    function onResults(results) {
-      drawLandmarks(results); // From mediapipe-hands.js
-
-      if (results.multiHandLandmarks) {
-        const landmarks = extractLandmarks(results.multiHandLandmarks);
-        const prediction = predictGesture(landmarks); // From gesture-model.js
-        document.getElementById('output').innerText = prediction || 'No sign detected';
+    // Safe extractLandmarks (with logs and error handling – ONLY ONE VERSION)
+    function extractLandmarks(multiHandLandmarks) {
+      try {
+        let flat = [];
+        if (!multiHandLandmarks || multiHandLandmarks.length === 0) {
+          console.log('No landmarks to extract'); // Debug
+          return flat;
+        }
         
-        // For React Native WebView: Send message (comment out if testing in browser)
-        // if (window.ReactNativeWebView) {
-        //   window.ReactNativeWebView.postMessage(JSON.stringify({ text: prediction }));
-        // }
+        multiHandLandmarks.forEach(hand => {
+          if (hand && hand.length === 21) { // Valid hand (21 landmarks)
+            hand.forEach(landmark => {
+              if (landmark && typeof landmark.x === 'number' && typeof landmark.y === 'number' && typeof landmark.z === 'number') { // Safe access
+                flat.push(landmark.x, landmark.y, landmark.z);
+              } else {
+                console.warn('Invalid landmark skipped:', landmark); // Debug bad data
+              }
+            });
+          } else {
+            console.warn('Invalid hand length:', hand ? hand.length : 'undefined'); // Debug
+          }
+        });
+        
+        console.log('Extracted landmarks length:', flat.length); // Debug (should be 63 for 1 hand)
+        return flat;
+      } catch (error) {
+        console.error('Extract landmarks error:', error);
+        return [];
       }
     }
 
-    function extractLandmarks(multiHandLandmarks) {
-      let flat = [];
-      multiHandLandmarks.forEach(hand => {
-        hand.forEach(landmark => flat.push(landmark.x, landmark.y, landmark.z));
+    async function init() {
+      console.log('Init starting...'); // Debug
+      await loadModel(); // From gesture-model.js – loads dummy if no real model
+      console.log('Model loaded successfully'); // Confirm
+      const video = document.getElementById('video');
+      await startCamera(video);
+      const camera = new Camera(video, {
+        onFrame: async () => { 
+          try {
+            await hands.send({ image: video }); 
+          } catch (error) {
+            console.error('hands.send error:', error); // Prevent frame loop crash
+          }
+        },
+        width: 640, height: 480
       });
-      return flat;
+      camera.start();
+      console.log('Camera started'); // Debug
+    }
+
+    async function startCamera(video) {
+      try {
+        const stream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: 'user' } });
+        video.srcObject = stream;
+        console.log('Camera stream started'); // Debug
+      } catch (error) {
+        console.error('startCamera error:', error);
+      }
+    }
+
+    function onResults(results) {
+  try {
+    console.log('onResults called'); // Debug every frame
+    // Always draw first (visuals won't pause)
+    drawMirroredLandmarks(results);
+
+    if (results.multiHandLandmarks && results.multiHandLandmarks.length > 0) {
+      console.log('Hands detected:', results.multiHandLandmarks.length); // Debug
+      
+      // Extract landmarks safely
+      const landmarks = extractLandmarks(results.multiHandLandmarks);
+      
+      console.log('Landmarks length after extraction:', landmarks.length); // Confirm
+      
+      // Predict (safe)
+      const prediction = predictGesture(landmarks);
+      console.log('Raw prediction from model:', prediction); // See output
+      
+      // Update text – fallback to 'Unknown' if null
+      document.getElementById('output').innerText = prediction || 'Unknown (prediction failed)';
+      
+      // Avg X log if valid
+      if (landmarks.length > 0) {
+        const avgX = landmarks.reduce((sum, val, i) => i % 3 === 0 ? sum + val : sum, 0) / (landmarks.length / 3);
+        console.log('Avg X:', avgX); // Debug position
+      }
+    } else {
+      document.getElementById('output').innerText = 'No sign detected - try palm facing camera';
+      console.log('No multiHandLandmarks'); // Debug
+    }
+  } catch (error) {
+    console.error('onResults error (detection continues):', error); // Catch overall
+    document.getElementById('output').innerText = 'Error - check console';
+  }
+}
+
+    // Mirror landmarks by flipping x-coordinates before drawing
+    // With custom larger red dots for better visibility
+    function drawMirroredLandmarks(results) {
+      try {
+        const canvas = document.getElementById('canvas');
+        const ctx = canvas.getContext('2d');
+        if (!canvas || !ctx) {
+          console.warn('Canvas or ctx not available'); // Debug
+          return;
+        }
+        
+        const video = document.getElementById('video'); // Fixed reference
+        canvas.width = video.videoWidth;
+        canvas.height = video.videoHeight;
+        ctx.save();
+        
+        // Clear and draw the image (video frame)
+        ctx.clearRect(0, 0, canvas.width, canvas.height);
+        if (results.image) {
+          ctx.drawImage(results.image, 0, 0, canvas.width, canvas.height);
+        } else {
+          console.log('No results.image for drawing'); // Debug
+        }
+        
+        if (results.multiHandLandmarks && results.multiHandLandmarks.length > 0) {
+          console.log('Drawing landmarks for', results.multiHandLandmarks.length, 'hands'); // Debug
+          for (let index = 0; index < results.multiHandLandmarks.length; index++) {
+            const landmarks = results.multiHandLandmarks[index];
+            
+            if (!landmarks || landmarks.length !== 21) {
+              console.warn('Invalid landmarks for drawing:', landmarks ? landmarks.length : 'undefined'); // Debug
+              continue;
+            }
+            
+            // Flip x-coordinates for mirroring (1 - x)
+            const flippedLandmarks = landmarks.map(landmark => ({
+              ...landmark,
+              x: 1 - landmark.x  // Mirror horizontally
+            }));
+            
+            // Draw connections (green lines) using MediaPipe
+            drawConnectors(ctx, flippedLandmarks, HAND_CONNECTIONS, {color: '#00FF00', lineWidth: 5});
+            
+            // Custom drawing for larger, more visible red dots (landmarks)
+            flippedLandmarks.forEach(landmark => {
+              const x = Math.floor(landmark.x * canvas.width);
+              const y = Math.floor(landmark.y * canvas.height);
+              
+              // Draw black outline circle (for contrast)
+              ctx.beginPath();
+              ctx.arc(x, y, 10, 0, 2 * Math.PI); // Radius 10px
+              ctx.lineWidth = 3;
+              ctx.strokeStyle = '#000000'; // Black outline
+              ctx.stroke();
+              
+              // Fill with red dot
+              ctx.beginPath();
+              ctx.arc(x, y, 8, 0, 2 * Math.PI); // Inner radius 8px
+              ctx.fillStyle = '#FF0000'; // Red fill
+              ctx.fill();
+            });
+          }
+        } else {
+          console.log('No landmarks to draw'); // Debug
+        }
+        
+        ctx.restore();
+      } catch (error) {
+        console.error('drawMirroredLandmarks error:', error);
+      }
     }
 
     init();
